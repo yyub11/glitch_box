@@ -118,9 +118,20 @@ const TTL_BASE = 18, TTL_RAND = 20;
 
 // ── AUDIO ───────────────────────────────────────
 let audioCtx = null;
+let recDest  = null; // MediaStreamDestination — captures audio for recording
+
 function ensureAudio() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    recDest  = audioCtx.createMediaStreamDestination();
+  }
   if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+// Route a gain node to BOTH speakers and recording
+function out(gainNode) {
+  gainNode.connect(audioCtx.destination);
+  gainNode.connect(recDest);
 }
 
 // Satisfying pentatonic notes (C major pentatonic: C D E G A)
@@ -133,7 +144,7 @@ function playTone(freq, dur=0.18, vol=0.18, type='sine', attack=0.01, release=0.
   g.gain.setValueAtTime(0, now);
   g.gain.linearRampToValueAtTime(vol, now+attack);
   g.gain.exponentialRampToValueAtTime(0.001, now+dur);
-  o.connect(g); g.connect(audioCtx.destination);
+  o.connect(g); out(g);
   o.start(now); o.stop(now+dur+.05);
 }
 
@@ -180,8 +191,10 @@ function startDrone() {
   master.gain.linearRampToValueAtTime(0.06, audioCtx.currentTime+1.2);
   const filt=audioCtx.createBiquadFilter();
   filt.type='lowpass'; filt.frequency.value=400; filt.Q.value=0.8;
-  master.connect(filt); filt.connect(audioCtx.destination);
   droneGainNode=master;
+  filt.connect(audioCtx.destination);
+  filt.connect(recDest);
+  master.connect(filt);
   freqs.forEach(f=>{
     const o=audioCtx.createOscillator();
     o.type='sine'; o.frequency.value=f;
@@ -210,7 +223,18 @@ function toggleRecord() {
   if (!isRecording) {
     recChunks=[];
     const mime=MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':'video/webm';
-    recorder=new MediaRecorder(c.captureStream(30),{mimeType:mime});
+    const canvasStream = c.captureStream(30);
+    const audioStream  = recDest ? recDest.stream : null;
+    let combined;
+    if (audioStream && audioStream.getAudioTracks().length > 0) {
+      combined = new MediaStream([
+        ...canvasStream.getVideoTracks(),
+        ...audioStream.getAudioTracks()
+      ]);
+    } else {
+      combined = canvasStream;
+    }
+    recorder=new MediaRecorder(combined,{mimeType:mime});
     recorder.ondataavailable=e=>{if(e.data.size>0)recChunks.push(e.data);};
     recorder.onstop=()=>{
       lastBlob=new Blob(recChunks,{type:'video/webm'});
@@ -226,12 +250,28 @@ function toggleRecord() {
     document.getElementById('recDot').style.display='none';
   }
 }
-function downloadLast() {
+async function downloadLast() {
   if (!lastBlob) return;
-  const url=URL.createObjectURL(lastBlob), a=document.createElement('a');
-  a.href=url; a.download=`glitch-${Date.now()}.webm`; a.click();
-  setTimeout(()=>URL.revokeObjectURL(url),5000);
-  toast('downloading…');
+  toast('converting to mp4…');
+  try {
+    const { createFFmpeg, fetchFile } = FFmpeg;
+    const ff = createFFmpeg({ log: false });
+    await ff.load();
+    ff.FS('writeFile', 'input.webm', await fetchFile(lastBlob));
+    await ff.run('-i','input.webm','-c:v','libx264','-preset','fast','-crf','23','-movflags','+faststart','-an','output.mp4');
+    const data = ff.FS('readFile','output.mp4');
+    const url  = URL.createObjectURL(new Blob([data.buffer],{type:'video/mp4'}));
+    const a    = document.createElement('a');
+    a.href=url; a.download=`glitch-${Date.now()}.mp4`; a.click();
+    setTimeout(()=>URL.revokeObjectURL(url),5000);
+    toast('✓ saved as mp4');
+  } catch(e) {
+    // fallback: download as webm if ffmpeg fails
+    const url=URL.createObjectURL(lastBlob), a=document.createElement('a');
+    a.href=url; a.download=`glitch-${Date.now()}.webm`; a.click();
+    setTimeout(()=>URL.revokeObjectURL(url),5000);
+    toast('saved as webm (mp4 unavailable)');
+  }
 }
 function toast(msg) {
   const t=document.getElementById('toast');
@@ -414,5 +454,6 @@ async function startAR(){
   }
 }
 </script>
+<script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
 </body>
 </html>
