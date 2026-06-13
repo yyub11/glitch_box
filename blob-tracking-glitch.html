@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>blob tracking</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; overflow:hidden; font-family:'Courier New',monospace; }
+#video { position:absolute; opacity:0; pointer-events:none; width:1px; height:1px; }
+#c { display:block; }
+.dt {
+  position:absolute; font-family:'Courier New',monospace; font-weight:700;
+  letter-spacing:.12em; pointer-events:none; mix-blend-mode:exclusion;
+  color:#c8ff00; white-space:nowrap;
+}
+
+/* ── HUD bottom bar ── */
+#hud {
+  position:fixed; bottom:28px; left:50%; transform:translateX(-50%);
+  display:none; gap:16px; z-index:50; align-items:center;
+}
+.hbtn {
+  width:52px; height:52px; border-radius:50%;
+  background:rgba(0,0,0,.55); backdrop-filter:blur(10px);
+  border:1.5px solid rgba(255,255,255,.2); color:#fff;
+  cursor:pointer; font-size:1.3rem;
+  display:flex; align-items:center; justify-content:center;
+  transition:border-color .15s, background .15s;
+}
+.hbtn:hover { border-color:#c8ff00; background:rgba(200,255,0,.1); }
+
+/* record button — bigger */
+#recBtn {
+  width:64px; height:64px; font-size:1rem;
+  border-color:rgba(255,255,255,.3);
+}
+#recBtn.recording {
+  border-color:#ff3b3b; background:rgba(255,59,59,.15);
+  animation:pulse 1s infinite;
+}
+/* inner dot for record */
+#recBtn::after {
+  content:''; display:block; width:18px; height:18px;
+  border-radius:50%; background:#ff3b3b; transition:border-radius .2s;
+}
+#recBtn.recording::after { border-radius:3px; }
+
+/* rec dot top right */
+#recDot {
+  position:fixed; top:18px; right:18px; display:none;
+  align-items:center; gap:6px; z-index:50;
+  font:.7rem 'Courier New',monospace; color:#ff3b3b; letter-spacing:.1em;
+}
+#recDot .dot { width:7px; height:7px; border-radius:50%; background:#ff3b3b; animation:pulse 1s infinite; }
+
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+/* download btn — hidden until recording done */
+#dlBtn { display:none; }
+
+/* start overlay */
+#ov {
+  position:fixed; inset:0; background:#000; display:flex;
+  flex-direction:column; align-items:center; justify-content:center;
+  gap:16px; z-index:99;
+}
+#ov p { color:rgba(255,255,255,.45); font:.82rem 'Courier New',monospace; letter-spacing:.08em; text-align:center; max-width:300px; }
+#startBtn {
+  background:transparent; color:#c8ff00; border:1px solid #c8ff00;
+  padding:10px 36px; font:.9rem 'Courier New',monospace;
+  letter-spacing:.15em; cursor:pointer; text-transform:uppercase;
+}
+#startBtn:hover { background:#c8ff00; color:#000; }
+
+/* toast */
+#toast {
+  position:fixed; top:18px; left:50%; transform:translateX(-50%);
+  background:rgba(0,0,0,.8); border:1px solid #c8ff00; color:#c8ff00;
+  padding:7px 18px; border-radius:999px; font:.72rem 'Courier New',monospace;
+  letter-spacing:.1em; z-index:99; display:none; white-space:nowrap;
+}
+</style>
+</head>
+<body>
+<video id="video" playsinline muted autoplay></video>
+<canvas id="c"></canvas>
+
+<div id="recDot"><span class="dot"></span> REC</div>
+<div id="toast"></div>
+
+<div id="hud">
+  <!-- flip camera -->
+  <button class="hbtn" id="flipBtn" title="flip camera" onclick="flipCamera()">🔄</button>
+  <!-- record -->
+  <button class="hbtn" id="recBtn" title="record" onclick="toggleRecord()"></button>
+  <!-- download -->
+  <button class="hbtn" id="dlBtn" title="download" onclick="downloadLast()">⬇</button>
+</div>
+
+<div id="ov">
+  <p>// BLOB TRACKING · GLITCH</p>
+  <button id="startBtn" onclick="startAR()">START CAMERA</button>
+  <p>humans only · sound · record</p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
+<script>
+const video = document.getElementById('video');
+const c     = document.getElementById('c');
+const ctx   = c.getContext('2d', {willReadFrequently:true});
+
+// ── tile size pools ──────────────────────────────
+const W_POOL = [16,22,30,38,50,66,88,110,140];
+const H_POOL = [16,22,30,38,50,66,88,110,140];
+const TINTS  = ['rgba(120,0,255,.30)','rgba(0,220,255,.24)','rgba(200,255,0,.20)','rgba(255,0,80,.22)'];
+const EFFECTS= ['neg','neg','neg','shift','black'];
+
+let tiles    = [];
+let glitched = new Map(); // idx -> {ttl, maxTtl, effect, tint}
+let poseBox  = null;
+let tick     = 0;
+let wasHuman = false;
+
+// glitch flicker: tiles randomly drop out even while human present
+const FLICKER_CHANCE = 0.018; // per tile per frame — chance to expire early
+const TTL_BASE = 18;
+const TTL_RAND = 20;
+
+// ── AUDIO ────────────────────────────────────────
+let audioCtx = null;
+function ensureAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+function playNoise(dur=0.07, freq=1000, vol=0.3) {
+  const buf = audioCtx.createBuffer(1, audioCtx.sampleRate*dur, audioCtx.sampleRate);
+  const d   = buf.getChannelData(0);
+  for (let i=0;i<d.length;i++) d[i]=(Math.random()*2-1)*(1-i/d.length);
+  const src=audioCtx.createBufferSource(), g=audioCtx.createGain(), f=audioCtx.createBiquadFilter();
+  f.type='bandpass'; f.frequency.value=freq;
+  src.buffer=buf; src.connect(f); f.connect(g); g.connect(audioCtx.destination);
+  g.gain.setValueAtTime(vol,audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(.001,audioCtx.currentTime+dur);
+  src.start();
+}
+function playSting(freqStart, freqEnd, dur=0.32, vol=0.22) {
+  const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+  o.type='sine';
+  o.frequency.setValueAtTime(freqStart,audioCtx.currentTime);
+  o.frequency.exponentialRampToValueAtTime(freqEnd,audioCtx.currentTime+dur);
+  g.gain.setValueAtTime(vol,audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(.001,audioCtx.currentTime+dur);
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(); o.stop(audioCtx.currentTime+dur);
+}
+let droneOsc=null, droneGain=null;
+function startDrone() {
+  if (droneOsc) return;
+  const o=audioCtx.createOscillator(), g=audioCtx.createGain(), f=audioCtx.createBiquadFilter();
+  f.type='lowpass'; f.frequency.value=300;
+  o.type='sawtooth'; o.frequency.value=55;
+  g.gain.setValueAtTime(0,audioCtx.currentTime);
+  g.gain.linearRampToValueAtTime(.07,audioCtx.currentTime+.6);
+  o.connect(f); f.connect(g); g.connect(audioCtx.destination);
+  o.start(); droneOsc=o; droneGain=g;
+}
+function stopDrone() {
+  if (!droneOsc) return;
+  droneGain.gain.linearRampToValueAtTime(0,audioCtx.currentTime+.5);
+  const n=droneOsc; droneOsc=null;
+  setTimeout(()=>{try{n.stop();}catch(e){}},600);
+}
+let glitchSndTick=0;
+
+// ── RECORDING ────────────────────────────────────
+let recorder=null, recChunks=[], lastBlob=null, isRecording=false;
+
+function toggleRecord() {
+  ensureAudio();
+  if (!isRecording) {
+    recChunks=[];
+    const mime=MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':'video/webm';
+    recorder=new MediaRecorder(c.captureStream(30),{mimeType:mime});
+    recorder.ondataavailable=e=>{if(e.data.size>0)recChunks.push(e.data);};
+    recorder.onstop=()=>{
+      lastBlob=new Blob(recChunks,{type:'video/webm'});
+      document.getElementById('dlBtn').style.display='flex';
+      toast('recording saved · tap ⬇ to download');
+    };
+    recorder.start(100);
+    isRecording=true;
+    document.getElementById('recBtn').classList.add('recording');
+    document.getElementById('recDot').style.display='flex';
+  } else {
+    recorder.stop(); isRecording=false;
+    document.getElementById('recBtn').classList.remove('recording');
+    document.getElementById('recDot').style.display='none';
+  }
+}
+function downloadLast() {
+  if (!lastBlob) return;
+  const url=URL.createObjectURL(lastBlob), a=document.createElement('a');
+  a.href=url; a.download=`glitch-${Date.now()}.webm`; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),5000);
+  toast('downloading…');
+}
+function toast(msg) {
+  const t=document.getElementById('toast');
+  t.textContent=msg; t.style.display='block';
+  clearTimeout(t._t); t._t=setTimeout(()=>t.style.display='none',2800);
+}
+
+// ── CAMERA FLIP ──────────────────────────────────
+let facingMode = 'environment';
+let mpCamera   = null;
+let poseInst   = null;
+
+async function flipCamera() {
+  facingMode = facingMode==='environment' ? 'user' : 'environment';
+  // Stop current stream
+  if (video.srcObject) video.srcObject.getTracks().forEach(t=>t.stop());
+  if (mpCamera) { try { await mpCamera.stop(); } catch(e){} }
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video:{facingMode, width:{ideal:1280}, height:{ideal:720}}
+  });
+  video.srcObject=stream;
+  await video.play();
+
+  // Restart mediapipe camera wrapper
+  mpCamera = new Camera(video, {
+    onFrame: async()=>{ await poseInst.send({image:video}); },
+    width:1280, height:720
+  });
+  await mpCamera.start();
+  toast(facingMode==='user' ? 'front camera' : 'back camera');
+}
+
+// ── TILE GRID ─────────────────────────────────────
+function buildGrid() {
+  tiles=[]; glitched.clear();
+  const W=c.width, H=c.height;
+  let y=0;
+  while (y<H) {
+    const th=Math.min(H_POOL[Math.floor(Math.random()*H_POOL.length)],H-y);
+    if (th<=0) break;
+    let x=0;
+    while (x<W) {
+      const tw=Math.min(W_POOL[Math.floor(Math.random()*W_POOL.length)],W-x);
+      if (tw<=0) break;
+      tiles.push({x,y,w:tw,h:th});
+      x+=tw;
+    }
+    y+=th;
+  }
+}
+function resize() { c.width=window.innerWidth; c.height=window.innerHeight; }
+window.addEventListener('resize',()=>{resize();buildGrid();});
+
+// ── ACTIVATE TILES ───────────────────────────────
+function activateBox(box) {
+  if (!box) return;
+  tiles.forEach((t,i)=>{
+    if (t.x+t.w>box.x && t.x<box.x+box.w && t.y+t.h>box.y && t.y<box.y+box.h) {
+      if (glitched.has(i)) {
+        const g=glitched.get(i);
+        // only refresh if it's running low — creates natural flicker
+        if (g.ttl < 6) g.ttl = TTL_BASE + Math.floor(Math.random()*TTL_RAND);
+      } else {
+        if (Math.random() < 0.6) { // not every tile activates at once
+          const ttl=TTL_BASE+Math.floor(Math.random()*TTL_RAND);
+          glitched.set(i,{ttl, maxTtl:ttl,
+            effect:EFFECTS[Math.floor(Math.random()*EFFECTS.length)],
+            tint:TINTS[Math.floor(Math.random()*TINTS.length)]
+          });
+        }
+      }
+    }
+  });
+}
+
+// ── DRIFT TEXTS ──────────────────────────────────
+const drifts=[];
+function makeDrifts() {
+  for (let i=0;i<8;i++) {
+    const el=document.createElement('div');
+    el.className='dt'; el.textContent='get lost';
+    document.body.appendChild(el);
+    drifts.push({el,x:Math.random()*80,y:Math.random()*80,
+      vx:(Math.random()-.5)*.12,vy:(Math.random()-.5)*.12,a:0,ta:0,sz:.8+Math.random()*1.3});
+  }
+}
+function tickDrifts(human) {
+  drifts.forEach(d=>{
+    d.ta=human?.4+Math.random()*.6:0;
+    d.a+=(d.ta-d.a)*.035;
+    d.x+=d.vx; d.y+=d.vy;
+    if(d.x<-5)d.vx=Math.abs(d.vx); if(d.x>95)d.vx=-Math.abs(d.vx);
+    if(d.y<-5)d.vy=Math.abs(d.vy); if(d.y>95)d.vy=-Math.abs(d.vy);
+    d.el.style.cssText=`left:${d.x}vw;top:${d.y}vh;opacity:${d.a};font-size:${d.sz*1.4}vw`;
+  });
+}
+
+// ── DRAW ─────────────────────────────────────────
+function draw() {
+  requestAnimationFrame(draw);
+  tick++;
+  if (video.readyState<2) return;
+
+  const W=c.width, H=c.height;
+  ctx.drawImage(video,0,0,W,H);
+
+  const human=poseBox!==null;
+  if (human&&!wasHuman){playSting(200,800);startDrone();}
+  if (!human&&wasHuman){playSting(600,100,.4,.18);stopDrone();}
+  wasHuman=human;
+
+  activateBox(poseBox);
+
+  const dead=[];
+  glitched.forEach((g,i)=>{
+    // flicker: random early expiry even while human present
+    if (Math.random()<FLICKER_CHANCE) { g.ttl=0; }
+    g.ttl--;
+    if (g.ttl<=0){dead.push(i);return;}
+    const t=tiles[i]; if(!t){dead.push(i);return;}
+    const {x,y,w,h}=t;
+
+    // fade alpha based on remaining ttl
+    const fade=Math.min(1, g.ttl/8);
+
+    if (g.effect==='neg') {
+      const id=ctx.getImageData(x,y,w,h);
+      for (let p=0;p<id.data.length;p+=4){
+        id.data[p]=255-id.data[p]; id.data[p+1]=255-id.data[p+1]; id.data[p+2]=255-id.data[p+2];
+      }
+      ctx.putImageData(id,x,y);
+      ctx.globalAlpha=fade;
+      ctx.fillStyle=g.tint; ctx.fillRect(x,y,w,h);
+      ctx.globalAlpha=1;
+    } else if (g.effect==='shift') {
+      const pool=[24,40,64,96];
+      const sh=(Math.random()<.5?1:-1)*pool[Math.floor(Math.random()*pool.length)];
+      const sx=Math.max(0,Math.min(W-w,x+sh));
+      try{ctx.putImageData(ctx.getImageData(sx,y,w,h),x,y);}catch(e){}
+    } else {
+      ctx.globalAlpha=fade*(.65+Math.random()*.3);
+      ctx.fillStyle='#000'; ctx.fillRect(x,y,w,h);
+      ctx.globalAlpha=1;
+    }
+
+    ctx.globalAlpha=fade*.8;
+    ctx.strokeStyle=Math.random()<.5?'rgba(200,255,0,1)':'rgba(160,0,255,1)';
+    ctx.lineWidth=.7;
+    ctx.strokeRect(x+.5,y+.5,w-1,h-1);
+    ctx.globalAlpha=1;
+  });
+  dead.forEach(i=>glitched.delete(i));
+
+  // glitch sound hits
+  glitchSndTick++;
+  if (human && glitchSndTick%5===0) playNoise(.06,800+Math.random()*1200,.28);
+
+  if (poseBox&&glitched.size>3) {
+    const {x,y,w,h}=poseBox;
+    const sy=y+(tick*2%Math.max(1,h));
+    ctx.strokeStyle='rgba(200,255,0,.22)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(x,sy); ctx.lineTo(x+w,sy); ctx.stroke();
+    ctx.strokeStyle='rgba(200,255,0,.78)'; ctx.lineWidth=1.5;
+    ctx.setLineDash([6,4]); ctx.strokeRect(x,y,w,h); ctx.setLineDash([]);
+    const tk=14; ctx.strokeStyle='#c8ff00'; ctx.lineWidth=2;
+    [[x,y],[x+w,y],[x,y+h],[x+w,y+h]].forEach(([px,py])=>{
+      const sx2=px===x?1:-1,sy2=py===y?1:-1;
+      ctx.beginPath(); ctx.moveTo(px+sx2*tk,py); ctx.lineTo(px,py); ctx.lineTo(px,py+sy2*tk); ctx.stroke();
+    });
+  }
+
+  tickDrifts(human);
+}
+
+// ── POSE ─────────────────────────────────────────
+function onPose(results) {
+  if (!results.poseLandmarks||results.poseLandmarks.length===0){poseBox=null;return;}
+  const W=c.width,H=c.height;
+  let x0=1,x1=0,y0=1,y1=0;
+  results.poseLandmarks.forEach(lm=>{
+    if(lm.visibility>.25){
+      if(lm.x<x0)x0=lm.x;if(lm.x>x1)x1=lm.x;
+      if(lm.y<y0)y0=lm.y;if(lm.y>y1)y1=lm.y;
+    }
+  });
+  const pad=.05;
+  poseBox={
+    x:Math.max(0,x0-pad)*W, y:Math.max(0,y0-pad)*H,
+    w:Math.min(1,(x1-x0)+pad*2)*W, h:Math.min(1,(y1-y0)+pad*2)*H
+  };
+}
+
+// ── START ─────────────────────────────────────────
+async function startAR() {
+  try {
+    ensureAudio();
+    const stream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode,width:{ideal:1280},height:{ideal:720}}
+    });
+    video.srcObject=stream; await video.play();
+    resize(); buildGrid();
+    document.getElementById('ov').remove();
+    document.getElementById('hud').style.display='flex';
+    makeDrifts();
+
+    poseInst=new Pose({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/pose/${f}`});
+    poseInst.setOptions({modelComplexity:1,smoothLandmarks:true,minDetectionConfidence:.5,minTrackingConfidence:.5});
+    poseInst.onResults(onPose);
+
+    mpCamera=new Camera(video,{
+      onFrame:async()=>{await poseInst.send({image:video});},
+      width:1280,height:720
+    });
+    await mpCamera.start();
+    draw();
+  } catch(e) {
+    document.querySelector('#ov p').textContent='Error: '+e.message;
+  }
+}
+</script>
+</body>
+</html>
