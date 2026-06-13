@@ -15,51 +15,41 @@ body { background:#000; overflow:hidden; font-family:'Courier New',monospace; }
   color:#c8ff00; white-space:nowrap;
 }
 
-/* ── HUD bottom bar ── */
+/* ── HUD ── */
 #hud {
   position:fixed; bottom:28px; left:50%; transform:translateX(-50%);
   display:none; gap:16px; z-index:50; align-items:center;
 }
 .hbtn {
   width:52px; height:52px; border-radius:50%;
-  background:rgba(0,0,0,.55); backdrop-filter:blur(10px);
+  background:rgba(0,0,0,.6); backdrop-filter:blur(10px);
   border:1.5px solid rgba(255,255,255,.2); color:#fff;
-  cursor:pointer; font-size:1.3rem;
+  cursor:pointer; font-size:1.25rem;
   display:flex; align-items:center; justify-content:center;
-  transition:border-color .15s, background .15s;
+  transition:border-color .15s, background .15s; -webkit-tap-highlight-color:transparent;
 }
-.hbtn:hover { border-color:#c8ff00; background:rgba(200,255,0,.1); }
+.hbtn:active { transform:scale(.92); }
+.hbtn:hover  { border-color:#c8ff00; background:rgba(200,255,0,.08); }
 
-/* record button — bigger */
-#recBtn {
-  width:64px; height:64px; font-size:1rem;
-  border-color:rgba(255,255,255,.3);
-}
-#recBtn.recording {
-  border-color:#ff3b3b; background:rgba(255,59,59,.15);
-  animation:pulse 1s infinite;
-}
-/* inner dot for record */
+#recBtn { width:64px; height:64px; border-color:rgba(255,255,255,.3); }
 #recBtn::after {
-  content:''; display:block; width:18px; height:18px;
-  border-radius:50%; background:#ff3b3b; transition:border-radius .2s;
+  content:''; display:block; width:20px; height:20px;
+  border-radius:50%; background:#ff3b3b; transition:border-radius .2s, transform .2s;
 }
-#recBtn.recording::after { border-radius:3px; }
+#recBtn.recording { border-color:#ff3b3b; background:rgba(255,59,59,.15); animation:pulse 1s infinite; }
+#recBtn.recording::after { border-radius:4px; transform:scale(.85); }
 
-/* rec dot top right */
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
 #recDot {
   position:fixed; top:18px; right:18px; display:none;
   align-items:center; gap:6px; z-index:50;
   font:.7rem 'Courier New',monospace; color:#ff3b3b; letter-spacing:.1em;
 }
-#recDot .dot { width:7px; height:7px; border-radius:50%; background:#ff3b3b; animation:pulse 1s infinite; }
+#recDot .dot { width:7px;height:7px;border-radius:50%;background:#ff3b3b;animation:pulse 1s infinite; }
 
-@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
-
-/* download btn — hidden until recording done */
 #dlBtn { display:none; }
 
-/* start overlay */
 #ov {
   position:fixed; inset:0; background:#000; display:flex;
   flex-direction:column; align-items:center; justify-content:center;
@@ -73,10 +63,9 @@ body { background:#000; overflow:hidden; font-family:'Courier New',monospace; }
 }
 #startBtn:hover { background:#c8ff00; color:#000; }
 
-/* toast */
 #toast {
   position:fixed; top:18px; left:50%; transform:translateX(-50%);
-  background:rgba(0,0,0,.8); border:1px solid #c8ff00; color:#c8ff00;
+  background:rgba(0,0,0,.85); border:1px solid #c8ff00; color:#c8ff00;
   padding:7px 18px; border-radius:999px; font:.72rem 'Courier New',monospace;
   letter-spacing:.1em; z-index:99; display:none; white-space:nowrap;
 }
@@ -90,12 +79,15 @@ body { background:#000; overflow:hidden; font-family:'Courier New',monospace; }
 <div id="toast"></div>
 
 <div id="hud">
-  <!-- flip camera -->
-  <button class="hbtn" id="flipBtn" title="flip camera" onclick="flipCamera()">🔄</button>
-  <!-- record -->
-  <button class="hbtn" id="recBtn" title="record" onclick="toggleRecord()"></button>
-  <!-- download -->
-  <button class="hbtn" id="dlBtn" title="download" onclick="downloadLast()">⬇</button>
+
+  <button class="hbtn" id="recBtn" onclick="toggleRecord()" title="record"></button>
+  <button class="hbtn" id="dlBtn" onclick="downloadLast()" title="download">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+      <polyline points="7 10 12 15 17 10"/>
+      <line x1="12" y1="15" x2="12" y2="3"/>
+    </svg>
+  </button>
 </div>
 
 <div id="ov">
@@ -111,69 +103,106 @@ const video = document.getElementById('video');
 const c     = document.getElementById('c');
 const ctx   = c.getContext('2d', {willReadFrequently:true});
 
-// ── tile size pools ──────────────────────────────
 const W_POOL = [16,22,30,38,50,66,88,110,140];
 const H_POOL = [16,22,30,38,50,66,88,110,140];
 const TINTS  = ['rgba(120,0,255,.30)','rgba(0,220,255,.24)','rgba(200,255,0,.20)','rgba(255,0,80,.22)'];
 const EFFECTS= ['neg','neg','neg','shift','black'];
 
 let tiles    = [];
-let glitched = new Map(); // idx -> {ttl, maxTtl, effect, tint}
+let glitched = new Map();
 let poseBox  = null;
 let tick     = 0;
 let wasHuman = false;
+const FLICKER = 0.018;
+const TTL_BASE = 18, TTL_RAND = 20;
 
-// glitch flicker: tiles randomly drop out even while human present
-const FLICKER_CHANCE = 0.018; // per tile per frame — chance to expire early
-const TTL_BASE = 18;
-const TTL_RAND = 20;
-
-// ── AUDIO ────────────────────────────────────────
+// ── AUDIO ───────────────────────────────────────
 let audioCtx = null;
 function ensureAudio() {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
 }
-function playNoise(dur=0.07, freq=1000, vol=0.3) {
-  const buf = audioCtx.createBuffer(1, audioCtx.sampleRate*dur, audioCtx.sampleRate);
-  const d   = buf.getChannelData(0);
-  for (let i=0;i<d.length;i++) d[i]=(Math.random()*2-1)*(1-i/d.length);
-  const src=audioCtx.createBufferSource(), g=audioCtx.createGain(), f=audioCtx.createBiquadFilter();
-  f.type='bandpass'; f.frequency.value=freq;
-  src.buffer=buf; src.connect(f); f.connect(g); g.connect(audioCtx.destination);
-  g.gain.setValueAtTime(vol,audioCtx.currentTime);
-  g.gain.exponentialRampToValueAtTime(.001,audioCtx.currentTime+dur);
-  src.start();
-}
-function playSting(freqStart, freqEnd, dur=0.32, vol=0.22) {
+
+// Satisfying pentatonic notes (C major pentatonic: C D E G A)
+const PENTA = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25, 587.33, 659.25, 783.99];
+
+function playTone(freq, dur=0.18, vol=0.18, type='sine', attack=0.01, release=0.14) {
   const o=audioCtx.createOscillator(), g=audioCtx.createGain();
-  o.type='sine';
-  o.frequency.setValueAtTime(freqStart,audioCtx.currentTime);
-  o.frequency.exponentialRampToValueAtTime(freqEnd,audioCtx.currentTime+dur);
-  g.gain.setValueAtTime(vol,audioCtx.currentTime);
-  g.gain.exponentialRampToValueAtTime(.001,audioCtx.currentTime+dur);
+  const now=audioCtx.currentTime;
+  o.type=type; o.frequency.value=freq;
+  g.gain.setValueAtTime(0, now);
+  g.gain.linearRampToValueAtTime(vol, now+attack);
+  g.gain.exponentialRampToValueAtTime(0.001, now+dur);
   o.connect(g); g.connect(audioCtx.destination);
-  o.start(); o.stop(audioCtx.currentTime+dur);
+  o.start(now); o.stop(now+dur+.05);
 }
-let droneOsc=null, droneGain=null;
+
+function playChime(freq) {
+  // Marimba-like: sine + slight detune
+  playTone(freq, 0.5, 0.14, 'sine', 0.005, 0.45);
+  playTone(freq*2.01, 0.25, 0.04, 'sine', 0.005, 0.2);
+}
+
+function playDetectArpeggio() {
+  // Rising pentatonic arp — satisfying entry
+  const base = PENTA[Math.floor(Math.random()*3)]; // C, D or E
+  [0, 0.08, 0.16, 0.24].forEach((t, i) => {
+    setTimeout(() => playChime(base * [1, 1.25, 1.5, 2][i]), t*1000);
+  });
+}
+
+function playLostArpeggio() {
+  // Falling gentle notes
+  const base = PENTA[2]; // E
+  [0, 0.09, 0.18].forEach((t, i) => {
+    setTimeout(() => playChime(base * [1.5, 1.25, 1][i] * 0.7), t*1000);
+  });
+}
+
+// Soft glitch ping — single pentatonic note with tiny reverb
+let lastPingNote = 0;
+function playGlitchPing() {
+  const note = PENTA[Math.floor(Math.random()*PENTA.length)];
+  if (note === lastPingNote) return; // avoid repeat
+  lastPingNote = note;
+  playTone(note, 0.22, 0.07, 'sine', 0.005, 0.2);
+  // add a quiet 5th harmonic for shimmer
+  playTone(note*1.5, 0.15, 0.025, 'sine', 0.005, 0.12);
+}
+
+// Drone: soft pad while human present
+let droneOscs=[], droneGainNode=null;
 function startDrone() {
-  if (droneOsc) return;
-  const o=audioCtx.createOscillator(), g=audioCtx.createGain(), f=audioCtx.createBiquadFilter();
-  f.type='lowpass'; f.frequency.value=300;
-  o.type='sawtooth'; o.frequency.value=55;
-  g.gain.setValueAtTime(0,audioCtx.currentTime);
-  g.gain.linearRampToValueAtTime(.07,audioCtx.currentTime+.6);
-  o.connect(f); f.connect(g); g.connect(audioCtx.destination);
-  o.start(); droneOsc=o; droneGain=g;
+  if (droneOscs.length) return;
+  const freqs=[55, 82.4, 110]; // A1 E2 A2 — warm minor
+  const master=audioCtx.createGain();
+  master.gain.setValueAtTime(0, audioCtx.currentTime);
+  master.gain.linearRampToValueAtTime(0.06, audioCtx.currentTime+1.2);
+  const filt=audioCtx.createBiquadFilter();
+  filt.type='lowpass'; filt.frequency.value=400; filt.Q.value=0.8;
+  master.connect(filt); filt.connect(audioCtx.destination);
+  droneGainNode=master;
+  freqs.forEach(f=>{
+    const o=audioCtx.createOscillator();
+    o.type='sine'; o.frequency.value=f;
+    // slight vibrato
+    const lfo=audioCtx.createOscillator(), lfoG=audioCtx.createGain();
+    lfo.frequency.value=0.3+Math.random()*0.2; lfoG.gain.value=0.4;
+    lfo.connect(lfoG); lfoG.connect(o.detune);
+    lfo.start(); o.connect(master); o.start();
+    droneOscs.push(o, lfo);
+  });
 }
 function stopDrone() {
-  if (!droneOsc) return;
-  droneGain.gain.linearRampToValueAtTime(0,audioCtx.currentTime+.5);
-  const n=droneOsc; droneOsc=null;
-  setTimeout(()=>{try{n.stop();}catch(e){}},600);
+  if (!droneGainNode) return;
+  droneGainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime+0.8);
+  const oscs=[...droneOscs]; droneOscs=[]; droneGainNode=null;
+  setTimeout(()=>oscs.forEach(o=>{try{o.stop();}catch(e){}}), 1000);
 }
-let glitchSndTick=0;
 
-// ── RECORDING ────────────────────────────────────
+let glitchPingTick=0;
+
+// ── RECORDING ───────────────────────────────────
 let recorder=null, recChunks=[], lastBlob=null, isRecording=false;
 
 function toggleRecord() {
@@ -188,8 +217,7 @@ function toggleRecord() {
       document.getElementById('dlBtn').style.display='flex';
       toast('recording saved · tap ⬇ to download');
     };
-    recorder.start(100);
-    isRecording=true;
+    recorder.start(100); isRecording=true;
     document.getElementById('recBtn').classList.add('recording');
     document.getElementById('recDot').style.display='flex';
   } else {
@@ -211,69 +239,42 @@ function toast(msg) {
   clearTimeout(t._t); t._t=setTimeout(()=>t.style.display='none',2800);
 }
 
-// ── CAMERA FLIP ──────────────────────────────────
-let facingMode = 'environment';
-let mpCamera   = null;
-let poseInst   = null;
+let poseInst=null, mpCam=null;
 
-async function flipCamera() {
-  facingMode = facingMode==='environment' ? 'user' : 'environment';
-  // Stop current stream
-  if (video.srcObject) video.srcObject.getTracks().forEach(t=>t.stop());
-  if (mpCamera) { try { await mpCamera.stop(); } catch(e){} }
-
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video:{facingMode, width:{ideal:1280}, height:{ideal:720}}
-  });
-  video.srcObject=stream;
-  await video.play();
-
-  // Restart mediapipe camera wrapper
-  mpCamera = new Camera(video, {
-    onFrame: async()=>{ await poseInst.send({image:video}); },
-    width:1280, height:720
-  });
-  await mpCamera.start();
-  toast(facingMode==='user' ? 'front camera' : 'back camera');
-}
-
-// ── TILE GRID ─────────────────────────────────────
+// ── TILE GRID ────────────────────────────────────
 function buildGrid() {
   tiles=[]; glitched.clear();
   const W=c.width, H=c.height;
   let y=0;
   while (y<H) {
     const th=Math.min(H_POOL[Math.floor(Math.random()*H_POOL.length)],H-y);
-    if (th<=0) break;
+    if(th<=0)break;
     let x=0;
     while (x<W) {
       const tw=Math.min(W_POOL[Math.floor(Math.random()*W_POOL.length)],W-x);
-      if (tw<=0) break;
-      tiles.push({x,y,w:tw,h:th});
-      x+=tw;
+      if(tw<=0)break;
+      tiles.push({x,y,w:tw,h:th}); x+=tw;
     }
     y+=th;
   }
 }
-function resize() { c.width=window.innerWidth; c.height=window.innerHeight; }
+function resize(){c.width=window.innerWidth;c.height=window.innerHeight;}
 window.addEventListener('resize',()=>{resize();buildGrid();});
 
 // ── ACTIVATE TILES ───────────────────────────────
 function activateBox(box) {
   if (!box) return;
   tiles.forEach((t,i)=>{
-    if (t.x+t.w>box.x && t.x<box.x+box.w && t.y+t.h>box.y && t.y<box.y+box.h) {
-      if (glitched.has(i)) {
+    if(t.x+t.w>box.x&&t.x<box.x+box.w&&t.y+t.h>box.y&&t.y<box.y+box.h){
+      if(glitched.has(i)){
         const g=glitched.get(i);
-        // only refresh if it's running low — creates natural flicker
-        if (g.ttl < 6) g.ttl = TTL_BASE + Math.floor(Math.random()*TTL_RAND);
+        if(g.ttl<6) g.ttl=TTL_BASE+Math.floor(Math.random()*TTL_RAND);
       } else {
-        if (Math.random() < 0.6) { // not every tile activates at once
+        if(Math.random()<0.6){
           const ttl=TTL_BASE+Math.floor(Math.random()*TTL_RAND);
-          glitched.set(i,{ttl, maxTtl:ttl,
+          glitched.set(i,{ttl,maxTtl:ttl,
             effect:EFFECTS[Math.floor(Math.random()*EFFECTS.length)],
-            tint:TINTS[Math.floor(Math.random()*TINTS.length)]
-          });
+            tint:TINTS[Math.floor(Math.random()*TINTS.length)]});
         }
       }
     }
@@ -282,106 +283,96 @@ function activateBox(box) {
 
 // ── DRIFT TEXTS ──────────────────────────────────
 const drifts=[];
-function makeDrifts() {
-  for (let i=0;i<8;i++) {
+function makeDrifts(){
+  for(let i=0;i<8;i++){
     const el=document.createElement('div');
-    el.className='dt'; el.textContent='get lost';
-    document.body.appendChild(el);
+    el.className='dt';el.textContent='get lost';document.body.appendChild(el);
     drifts.push({el,x:Math.random()*80,y:Math.random()*80,
       vx:(Math.random()-.5)*.12,vy:(Math.random()-.5)*.12,a:0,ta:0,sz:.8+Math.random()*1.3});
   }
 }
-function tickDrifts(human) {
+function tickDrifts(human){
   drifts.forEach(d=>{
     d.ta=human?.4+Math.random()*.6:0;
     d.a+=(d.ta-d.a)*.035;
-    d.x+=d.vx; d.y+=d.vy;
-    if(d.x<-5)d.vx=Math.abs(d.vx); if(d.x>95)d.vx=-Math.abs(d.vx);
-    if(d.y<-5)d.vy=Math.abs(d.vy); if(d.y>95)d.vy=-Math.abs(d.vy);
+    d.x+=d.vx;d.y+=d.vy;
+    if(d.x<-5)d.vx=Math.abs(d.vx);if(d.x>95)d.vx=-Math.abs(d.vx);
+    if(d.y<-5)d.vy=Math.abs(d.vy);if(d.y>95)d.vy=-Math.abs(d.vy);
     d.el.style.cssText=`left:${d.x}vw;top:${d.y}vh;opacity:${d.a};font-size:${d.sz*1.4}vw`;
   });
 }
 
 // ── DRAW ─────────────────────────────────────────
-function draw() {
+function draw(){
   requestAnimationFrame(draw);
   tick++;
-  if (video.readyState<2) return;
-
-  const W=c.width, H=c.height;
+  if(video.readyState<2)return;
+  const W=c.width,H=c.height;
   ctx.drawImage(video,0,0,W,H);
 
   const human=poseBox!==null;
-  if (human&&!wasHuman){playSting(200,800);startDrone();}
-  if (!human&&wasHuman){playSting(600,100,.4,.18);stopDrone();}
+  if(human&&!wasHuman){playDetectArpeggio();startDrone();}
+  if(!human&&wasHuman){playLostArpeggio();stopDrone();}
   wasHuman=human;
 
   activateBox(poseBox);
 
+  // glitch sound ping
+  glitchPingTick++;
+  if(human&&glitchPingTick%8===0) playGlitchPing();
+
   const dead=[];
   glitched.forEach((g,i)=>{
-    // flicker: random early expiry even while human present
-    if (Math.random()<FLICKER_CHANCE) { g.ttl=0; }
+    if(Math.random()<FLICKER) g.ttl=0;
     g.ttl--;
-    if (g.ttl<=0){dead.push(i);return;}
-    const t=tiles[i]; if(!t){dead.push(i);return;}
+    if(g.ttl<=0){dead.push(i);return;}
+    const t=tiles[i];if(!t){dead.push(i);return;}
     const {x,y,w,h}=t;
+    const fade=Math.min(1,g.ttl/8);
 
-    // fade alpha based on remaining ttl
-    const fade=Math.min(1, g.ttl/8);
-
-    if (g.effect==='neg') {
+    if(g.effect==='neg'){
       const id=ctx.getImageData(x,y,w,h);
-      for (let p=0;p<id.data.length;p+=4){
-        id.data[p]=255-id.data[p]; id.data[p+1]=255-id.data[p+1]; id.data[p+2]=255-id.data[p+2];
+      for(let p=0;p<id.data.length;p+=4){
+        id.data[p]=255-id.data[p];id.data[p+1]=255-id.data[p+1];id.data[p+2]=255-id.data[p+2];
       }
       ctx.putImageData(id,x,y);
-      ctx.globalAlpha=fade;
-      ctx.fillStyle=g.tint; ctx.fillRect(x,y,w,h);
-      ctx.globalAlpha=1;
-    } else if (g.effect==='shift') {
+      ctx.globalAlpha=fade;ctx.fillStyle=g.tint;ctx.fillRect(x,y,w,h);ctx.globalAlpha=1;
+    } else if(g.effect==='shift'){
       const pool=[24,40,64,96];
       const sh=(Math.random()<.5?1:-1)*pool[Math.floor(Math.random()*pool.length)];
       const sx=Math.max(0,Math.min(W-w,x+sh));
       try{ctx.putImageData(ctx.getImageData(sx,y,w,h),x,y);}catch(e){}
     } else {
       ctx.globalAlpha=fade*(.65+Math.random()*.3);
-      ctx.fillStyle='#000'; ctx.fillRect(x,y,w,h);
-      ctx.globalAlpha=1;
+      ctx.fillStyle='#000';ctx.fillRect(x,y,w,h);ctx.globalAlpha=1;
     }
 
-    ctx.globalAlpha=fade*.8;
+    ctx.globalAlpha=fade*.85;
     ctx.strokeStyle=Math.random()<.5?'rgba(200,255,0,1)':'rgba(160,0,255,1)';
-    ctx.lineWidth=.7;
-    ctx.strokeRect(x+.5,y+.5,w-1,h-1);
+    ctx.lineWidth=.7;ctx.strokeRect(x+.5,y+.5,w-1,h-1);
     ctx.globalAlpha=1;
   });
   dead.forEach(i=>glitched.delete(i));
 
-  // glitch sound hits
-  glitchSndTick++;
-  if (human && glitchSndTick%5===0) playNoise(.06,800+Math.random()*1200,.28);
-
-  if (poseBox&&glitched.size>3) {
-    const {x,y,w,h}=poseBox;
+  if(poseBox&&glitched.size>3){
+    const{x,y,w,h}=poseBox;
     const sy=y+(tick*2%Math.max(1,h));
-    ctx.strokeStyle='rgba(200,255,0,.22)'; ctx.lineWidth=1;
-    ctx.beginPath(); ctx.moveTo(x,sy); ctx.lineTo(x+w,sy); ctx.stroke();
-    ctx.strokeStyle='rgba(200,255,0,.78)'; ctx.lineWidth=1.5;
-    ctx.setLineDash([6,4]); ctx.strokeRect(x,y,w,h); ctx.setLineDash([]);
-    const tk=14; ctx.strokeStyle='#c8ff00'; ctx.lineWidth=2;
+    ctx.strokeStyle='rgba(200,255,0,.22)';ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(x,sy);ctx.lineTo(x+w,sy);ctx.stroke();
+    ctx.strokeStyle='rgba(200,255,0,.78)';ctx.lineWidth=1.5;
+    ctx.setLineDash([6,4]);ctx.strokeRect(x,y,w,h);ctx.setLineDash([]);
+    const tk=14;ctx.strokeStyle='#c8ff00';ctx.lineWidth=2;
     [[x,y],[x+w,y],[x,y+h],[x+w,y+h]].forEach(([px,py])=>{
       const sx2=px===x?1:-1,sy2=py===y?1:-1;
-      ctx.beginPath(); ctx.moveTo(px+sx2*tk,py); ctx.lineTo(px,py); ctx.lineTo(px,py+sy2*tk); ctx.stroke();
+      ctx.beginPath();ctx.moveTo(px+sx2*tk,py);ctx.lineTo(px,py);ctx.lineTo(px,py+sy2*tk);ctx.stroke();
     });
   }
-
   tickDrifts(human);
 }
 
 // ── POSE ─────────────────────────────────────────
-function onPose(results) {
-  if (!results.poseLandmarks||results.poseLandmarks.length===0){poseBox=null;return;}
+function onPose(results){
+  if(!results.poseLandmarks||results.poseLandmarks.length===0){poseBox=null;return;}
   const W=c.width,H=c.height;
   let x0=1,x1=0,y0=1,y1=0;
   results.poseLandmarks.forEach(lm=>{
@@ -391,21 +382,19 @@ function onPose(results) {
     }
   });
   const pad=.05;
-  poseBox={
-    x:Math.max(0,x0-pad)*W, y:Math.max(0,y0-pad)*H,
-    w:Math.min(1,(x1-x0)+pad*2)*W, h:Math.min(1,(y1-y0)+pad*2)*H
-  };
+  poseBox={x:Math.max(0,x0-pad)*W,y:Math.max(0,y0-pad)*H,
+    w:Math.min(1,(x1-x0)+pad*2)*W,h:Math.min(1,(y1-y0)+pad*2)*H};
 }
 
 // ── START ─────────────────────────────────────────
-async function startAR() {
-  try {
+async function startAR(){
+  try{
     ensureAudio();
     const stream=await navigator.mediaDevices.getUserMedia({
-      video:{facingMode,width:{ideal:1280},height:{ideal:720}}
+      video:{facingMode:'environment',width:{ideal:1280},height:{ideal:720}}
     });
-    video.srcObject=stream; await video.play();
-    resize(); buildGrid();
+    video.srcObject=stream;await video.play();
+    resize();buildGrid();
     document.getElementById('ov').remove();
     document.getElementById('hud').style.display='flex';
     makeDrifts();
@@ -414,13 +403,13 @@ async function startAR() {
     poseInst.setOptions({modelComplexity:1,smoothLandmarks:true,minDetectionConfidence:.5,minTrackingConfidence:.5});
     poseInst.onResults(onPose);
 
-    mpCamera=new Camera(video,{
+    mpCam=new Camera(video,{
       onFrame:async()=>{await poseInst.send({image:video});},
       width:1280,height:720
     });
-    await mpCamera.start();
+    await mpCam.start();
     draw();
-  } catch(e) {
+  }catch(e){
     document.querySelector('#ov p').textContent='Error: '+e.message;
   }
 }
